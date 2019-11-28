@@ -1,0 +1,31 @@
+#!/bin/sh
+#
+# ftp-watchd
+#
+
+# PROVIDE: ftpwatchd
+# REQUIRE: pureftpd
+# KEYWORD: shutdown
+
+. /etc/rc.subr
+
+name="ftp_watchd"
+rcvar="ftp_watchd_enable ftp_watchd_command"
+
+load_rc_config ${name}
+
+command="/usr/local/sbin/pure-uploadscript"
+command_args="-B -r ${ftp_watchd_command}"
+pidfile="/var/run/pure-uploadscript.pid"
+
+stop_cmd="${name}_stop"
+
+ftp_watchd_stop(){
+	if [ -e ${pidfile} ]; then
+		local pid=`cat ${pidfile}`
+		echo "Kill: ${pid}"
+		kill ${pid}
+	fi
+}
+
+run_rc_command "$1"

@@ -1,0 +1,130 @@
+#!/usr/local/bin/bash
+
+if [[ "$#" -eq 0 ]]; then
+	echo -e \
+"Usage:\n\
+Create: zbackup             DATASET [ROTATION_CNT]\n\
+  List: zbackup -l|--list   [DATASET|ID|DATASET ID]\n\
+Delete: zbackup -d|--delete [DATASET|ID|DATASET ID]\n\
+Export: zbackup -e|--export DATASET [ID=1]\n\
+Import: zbackup -i|--import FILENAME DATASET"
+exit 0
+fi
+
+
+# Create: `zbackup             DATASET [ROTATION_CNT]`
+#   List: `zbackup -l|--list   [DATASET|ID|DATASET ID]`
+# Delete: `zbackup -d|--delete [DATASET|ID|DATASET ID]`
+# Export: `zbackup -e|--export DATASET [ID=1]`
+# Import: `zbackup -i|--import FILENAME DATASET`
+
+EXPORT_DIR="/home/yuuki/hw3/exports"
+
+function get_snapshot_list(){ # $1: DATASET
+	local DATASET=$1
+	
+	if [[ -z "${DATASET}" ]]; then # DATASET not specified
+		local LIST_CMD="zfs list -H -r -t snapshot -o name -s creation"
+	else # DATASET specified
+		local LIST_CMD="zfs list -H -r -d1 -t snapshot -o name -s creation ${DATASET}"
+	fi
+	
+	#add line number
+	${LIST_CMD} | awk -F'\n' '{print NR " " $1}'
+}
+
+case $1 in
+	-l|--list)
+		shift
+		if [[ "$1" =~ ^[0-9]+$ ]]; then # ID
+			ID=$1
+		else # DATASET or DATASET ID
+			DATASET=$1
+			ID=$2
+		fi
+		
+		echo -e "ID\tDATASET\t\tTIME"
+		
+		if [[ -n "${ID}" ]]; then # ID specified
+			get_snapshot_list ${DATASET} | awk -F'[ @]' '{print $1 "\t" $2 "\t" $3}' | grep -m1 "^${ID}"
+		else
+			get_snapshot_list ${DATASET} | awk -F'[ @]' '{print $1 "\t" $2 "\t" $3}'
+		fi
+		
+		unset ID DATASET
+	;;
+	-d|--delete)
+		shift
+		if [[ "$1" =~ ^[0-9]+$ ]]; then # ID
+			ID=$1
+		else # DATASET or DATASET ID
+			DATASET=$1
+			ID=$2
+		fi
+		
+		if [[ -n "${ID}" ]]; then # ID specified
+			SNAPSHOT_TO_DESTROY=`get_snapshot_list ${DATASET} | awk '{print $1 "\t" $2}' | grep -m1 "^${ID}" | cut -f2`
+		else
+			SNAPSHOT_TO_DESTROY=`get_snapshot_list ${DATASET} | awk '{print $1 "\t" $2}' | cut -f2`
+		fi
+		
+		# destroy snapshots
+		if [[ -n "${SNAPSHOT_TO_DESTROY}" ]]; then # check if string not empty
+			echo ${SNAPSHOT_TO_DESTROY} | xargs -n1 -I % echo "Destroy %"
+			echo ${SNAPSHOT_TO_DESTROY} | xargs -n1 -I % zfs destroy %
+		fi
+		
+		unset ID DATASET SNAPSHOT_TO_DESTROY
+	;;
+	-e|--export)
+		shift
+		DATASET=$1 # must specified
+		ID=$2
+		: ${ID:=1}
+		
+		SNAPSHOT_TO_EXPORT=`get_snapshot_list ${DATASET} | awk '{print $1 "\t" $2}' | grep -m1 "^${ID}" | cut -f2`
+		
+		mkdir -p "`dirname "${EXPORT_DIR}/${SNAPSHOT_TO_EXPORT}"`" # make intermediate directories if necessary
+		
+		echo "Export ${SNAPSHOT_TO_EXPORT} to ${EXPORT_DIR}/${SNAPSHOT_TO_EXPORT}.gz.enc"
+		
+		zfs send ${SNAPSHOT_TO_EXPORT} | gzip -c | openssl aes-256-cbc -salt -pbkdf2 -e -out "${EXPORT_DIR}/${SNAPSHOT_TO_EXPORT}.gz.enc"
+		
+		unset DATASET ID SNAPSHOT_TO_EXPORT
+	;;
+	-i|--import)
+		shift
+		FILENAME=$1
+		DATASET=$2
+		
+		echo "Import ${FILENAME} to ${DATASET}"
+		
+		openssl aes-256-cbc -salt -pbkdf2 -d -in "${FILENAME}" | gzip -cd | zfs recv -F ${DATASET}
+		
+		unset FILENAME DATASET
+	;;
+	*) # create
+		DATASET=$1
+		ROTATION_CNT=$2
+		: ${ROTATION_CNT:=20}
+		
+		SNAPSHOT_TO_DESTROY=`zfs list -H -r -d1 -t snapshot -o name -S creation ${DATASET} | sed -n "${ROTATION_CNT},$ p"` # get the range of snapshot to destroy
+		
+		# ----------create snapshot----------
+		CURRENT_DATE=`date '+%Y-%m-%d-%H:%M:%S'` # get current time (use as filename)
+		SNAPSHOT_NAME="${1}@${CURRENT_DATE}"
+		
+		echo "Snap ${SNAPSHOT_NAME}"
+		
+		zfs snapshot ${SNAPSHOT_NAME} # create snapshot
+		# -----------------------------------
+		
+		# destroy old snapshots to meet ROTATION_CNT
+		if [[ -n "${SNAPSHOT_TO_DESTROY}" ]]; then # check if string not empty
+			echo ${SNAPSHOT_TO_DESTROY} | xargs -n1 -I % echo "Destroy %"
+			echo ${SNAPSHOT_TO_DESTROY} | xargs -n1 -I % zfs destroy %
+		fi
+		
+		unset DATASET ROTATION_CNT SNAPSHOT_TO_DESTROY CURRENT_DATE SNAPSHOT_NAME
+	;;
+esac
